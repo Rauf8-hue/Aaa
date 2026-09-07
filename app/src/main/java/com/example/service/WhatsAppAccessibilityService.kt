@@ -93,11 +93,13 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                     lastProcessedText = incoming.text
                     lastProcessedTimestamp = now
 
-                    Log.d(TAG, "Detected incoming WhatsApp message: '${incoming.text}' from '${incoming.sender}' (isGroup=${incoming.isGroup})")
+                    Log.d(TAG, "[WhatsApp] Message detected: '${incoming.text}' from '${incoming.sender}' (isGroup=${incoming.isGroup})")
+                    Log.d(TAG, "[Message] Text extracted: '${incoming.text}'")
+
                     QuantumBotApp.instance.messageProcessor.onNewWhatsAppMessage(incoming)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error parsing WhatsApp conversation: ${e.message}", e)
+                Log.e(TAG, "[WhatsApp ERROR] Error parsing WhatsApp conversation: ${e.message}", e)
             }
         }
     }
@@ -118,7 +120,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             return null
         }
 
-        // 3. Inspect message nodes from bottom up (newest message)
+        // 3. Inspect message nodes from bottom up (newest message first)
         for (i in messageNodes.indices.reversed()) {
             val node = messageNodes[i]
             val text = node.text?.toString()?.trim() ?: continue
@@ -127,13 +129,13 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             // Filter out timestamps, system info, audio durations, or user's own status
             if (isIgnorableSystemText(text)) continue
 
-            // Determine if message is outgoing (sent by bot/user)
+            // Determine if message is outgoing (sent by user or bot)
             if (isOutgoingMessage(node)) {
-                // If the latest message in the chat is outgoing, we should not reply to it!
+                // If the latest message in the chat is outgoing, we should not reply to it
                 return null
             }
 
-            // Valid incoming message found!
+            // Valid incoming message found
             return IncomingMessage(
                 text = text,
                 sender = chatTitle,
@@ -182,10 +184,27 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     private fun collectMessageNodes(node: AccessibilityNodeInfo, list: MutableList<AccessibilityNodeInfo>) {
-        val viewId = node.viewIdResourceName ?: ""
+        // Strictly exclude editable inputs (e.g. WhatsApp chat entry field, search bar)
+        if (node.isEditable || node.className?.contains("EditText", ignoreCase = true) == true) {
+            return
+        }
+
+        val viewId = node.viewIdResourceName?.lowercase() ?: ""
+        // Exclude system views, headers, search bars, and entry containers
+        if (viewId.contains("entry") ||
+            viewId.contains("search") ||
+            viewId.contains("contact_name") ||
+            viewId.contains("title") ||
+            viewId.contains("status") ||
+            viewId.contains("toolbar") ||
+            viewId.contains("action_bar")
+        ) {
+            return
+        }
+
         val isMessageText = viewId.contains("message_text") ||
                 viewId.contains("caption") ||
-                viewId.contains("text_entry") == false && node.className?.contains("TextView") == true
+                (node.className?.contains("TextView", ignoreCase = true) == true && !node.text.isNullOrBlank())
 
         if (isMessageText && !node.text.isNullOrBlank()) {
             list.add(node)
@@ -198,17 +217,26 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     private fun isOutgoingMessage(node: AccessibilityNodeInfo): Boolean {
-        // Check parent containers for outgoing indicators
         var current: AccessibilityNodeInfo? = node
         var depth = 0
-        while (current != null && depth < 4) {
+        while (current != null && depth < 5) {
             val resName = current.viewIdResourceName?.lowercase() ?: ""
-            if (resName.contains("outgoing") || resName.contains("message_out")) {
+            if (resName.contains("outgoing") ||
+                resName.contains("message_out") ||
+                resName.contains("msg_out") ||
+                resName.contains("row_chat_out") ||
+                resName.contains("bubble_out")
+            ) {
                 return true
             }
 
             val desc = current.contentDescription?.toString()?.lowercase() ?: ""
-            if (desc.contains("read") || desc.contains("delivered") || desc.contains("sent") || desc.contains("pending")) {
+            if (desc.contains("read") ||
+                desc.contains("delivered") ||
+                desc.contains("sent") ||
+                desc.contains("pending") ||
+                desc.contains("seen")
+            ) {
                 return true
             }
 
@@ -227,3 +255,4 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         return false
     }
 }
+

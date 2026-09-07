@@ -34,64 +34,88 @@ class MessageProcessor(
     }
 
     private val processMutex = Mutex()
-    // In-memory conversation context cache per sender (e.g. sender -> list of (role, message))
+    // In-memory conversation context cache per sender (sender -> list of (role, message))
     private val chatContextMap = ConcurrentHashMap<String, MutableList<Pair<String, String>>>()
+    // Prevent duplicate in-flight processing of the exact same message while Gemini is generating
+    private val inFlightKeys = ConcurrentHashMap.newKeySet<String>()
+    // Prevent bot self-reply loops: store recently sent replies with timestamp (expires after 30s)
+    private val recentSentReplies = ConcurrentHashMap<String, Long>()
 
     /**
      * Primary entry point when a new WhatsApp message is detected.
      */
     fun onNewWhatsAppMessage(message: IncomingMessage) {
+        val trimmedText = message.text.trim()
+        if (trimmedText.isBlank()) return
+
+        val senderKey = if (message.sender.isNotBlank()) message.sender else "default_chat"
+        val messageKey = "$senderKey::$trimmedText"
+
+        // Discard if already being processed in-flight
+        if (!inFlightKeys.add(messageKey)) {
+            Log.d(TAG, "[Bot] Message is already in-flight, skipping duplicate event: '$trimmedText'")
+            return
+        }
+
         scope.launch(Dispatchers.IO) {
-            processMutex.withLock {
-                processMessageInternal(message)
+            try {
+                processMutex.withLock {
+                    processMessageInternal(message, senderKey)
+                }
+            } finally {
+                inFlightKeys.remove(messageKey)
             }
         }
     }
 
-    private suspend fun processMessageInternal(message: IncomingMessage) {
+    private suspend fun processMessageInternal(message: IncomingMessage, senderKey: String) {
         val trimmedText = message.text.trim()
-        if (trimmedText.isBlank()) {
-            return
-        }
-
         val settings = settingsRepository.settings.value
 
         // 1. Check if Bot is enabled
         if (!settings.isBotEnabled) {
-            Log.d(TAG, "Bot is disabled, ignoring incoming message")
+            Log.d(TAG, "[Bot] Bot is disabled in settings, ignoring message")
             return
         }
 
         // 2. Check if Auto Reply is enabled
         if (!settings.isAutoReplyEnabled) {
-            Log.d(TAG, "Auto Reply is disabled, ignoring incoming message")
+            Log.d(TAG, "[Bot] Auto Reply is disabled in settings, ignoring message")
             return
         }
 
-        // 3. Check Chat Type Settings
+        // 3. Check Chat Type Settings (Group vs Private)
         if (message.isGroup && !settings.replyGroupChats) {
-            Log.d(TAG, "Group chat replies are disabled, ignoring group message from ${message.sender}")
+            Log.d(TAG, "[Bot] Group chat replies are disabled, ignoring group message from ${message.sender}")
             return
         }
         if (!message.isGroup && !settings.replyPrivateChats) {
-            Log.d(TAG, "Private chat replies are disabled, ignoring private message from ${message.sender}")
+            Log.d(TAG, "[Bot] Private chat replies are disabled, ignoring private message from ${message.sender}")
             return
         }
 
-        // 4. Duplicate Check
+        // 4. Bot Self-Reply Loop Prevention: Check if this message is our own recently sent reply
+        cleanOldSentReplies()
+        if (recentSentReplies.containsKey(trimmedText)) {
+            Log.d(TAG, "[Bot] Message matches recently sent reply from Quantum Bot, ignoring loop")
+            return
+        }
+
+        // 5. Duplicate Check against persistent storage
         if (processedMessageRepository.isMessageProcessed(message.sender, trimmedText)) {
-            Log.d(TAG, "Message already processed recently, ignoring: '$trimmedText'")
+            Log.d(TAG, "[Bot] Message already processed recently in database, ignoring: '$trimmedText'")
             return
         }
 
-        val senderKey = if (message.sender.isNotBlank()) message.sender else "default_chat"
+        Log.i(TAG, "[Bot] Message accepted from '${message.sender}'")
 
-        // 5. Check Custom Auto Reply Rules (Checked BEFORE Gemini)
+        // 6. Check Custom Auto Reply Rules (Checked BEFORE Gemini)
+        Log.d(TAG, "[CustomReply] Checking rules...")
         val customRules = customReplyRepository.getEnabledReplies()
         val matchedRule = customReplyEngine.findMatchingReply(trimmedText, customRules)
 
         if (matchedRule != null) {
-            Log.i(TAG, "Custom rule matched: '${matchedRule.trigger}' -> '${matchedRule.reply}'")
+            Log.i(TAG, "[CustomReply] Matched rule: '${matchedRule.trigger}' -> '${matchedRule.reply}'")
             executeReply(
                 incoming = message,
                 replyText = matchedRule.reply,
@@ -103,8 +127,10 @@ class MessageProcessor(
             return
         }
 
-        // 6. Gemini AI Fallback
-        Log.i(TAG, "No custom rule matched. Calling Gemini AI fallback for '$trimmedText'")
+        Log.d(TAG, "[CustomReply] No matching rule")
+
+        // 7. Gemini AI Fallback
+        Log.i(TAG, "[Gemini] Request started for message: '${trimmedText.take(50)}'")
 
         val history = if (settings.conversationContextEnabled) {
             chatContextMap[senderKey]?.toList() ?: emptyList()
@@ -122,7 +148,7 @@ class MessageProcessor(
             is GeminiResult.Success -> {
                 val cleanAiReply = geminiResult.text.trim()
                 if (cleanAiReply.isBlank() || cleanAiReply.equals("null", ignoreCase = true)) {
-                    Log.w(TAG, "Gemini returned empty or invalid text, skipping sending")
+                    Log.w(TAG, "[Gemini ERROR] Gemini returned empty or null text, skipping sending")
                     if (settings.isLoggingEnabled) {
                         activityLogRepository.log(
                             ActivityLogEntry(
@@ -139,6 +165,8 @@ class MessageProcessor(
                     return
                 }
 
+                Log.d(TAG, "[Gemini] Text extracted: '${cleanAiReply.take(60)}'")
+
                 executeReply(
                     incoming = message,
                     replyText = cleanAiReply,
@@ -149,9 +177,9 @@ class MessageProcessor(
                 )
             }
             is GeminiResult.Error -> {
-                Log.e(TAG, "Gemini generation failed: ${geminiResult.message}")
-                // Do NOT send an error message to the customer
-                // Log failure locally for user visibility
+                Log.e(TAG, "[Gemini ERROR] API request failed: ${geminiResult.message}")
+                // Do NOT send an error message or apology to the WhatsApp customer
+                // Log failure locally for user visibility in the activity tab
                 if (settings.isLoggingEnabled) {
                     activityLogRepository.log(
                         ActivityLogEntry(
@@ -179,8 +207,12 @@ class MessageProcessor(
     ) {
         // Apply configurable reply delay
         if (delaySeconds > 0) {
+            Log.d(TAG, "[Bot] Waiting configurable delay of ${delaySeconds}s before sending...")
             delay(delaySeconds * 1000L)
         }
+
+        // Record in loop prevention cache before sending
+        recentSentReplies[replyText.trim()] = System.currentTimeMillis()
 
         // Send via WhatsAppAccessibilityController
         val sendSuccess = accessibilityController.sendReply(replyText)
@@ -194,7 +226,6 @@ class MessageProcessor(
             historyList.add("user" to incoming.text)
             historyList.add("model" to replyText)
             if (historyList.size > 8) {
-                // Trim oldest context
                 while (historyList.size > 8) {
                     historyList.removeAt(0)
                 }
@@ -215,7 +246,7 @@ class MessageProcessor(
                 )
             }
         } else {
-            Log.e(TAG, "Failed to send WhatsApp message via Accessibility")
+            Log.e(TAG, "[Reply ERROR] Failed to send WhatsApp message via Accessibility")
             val settings = settingsRepository.settings.value
             if (settings.isLoggingEnabled) {
                 activityLogRepository.log(
@@ -232,4 +263,17 @@ class MessageProcessor(
             }
         }
     }
+
+    private fun cleanOldSentReplies() {
+        val now = System.currentTimeMillis()
+        val expiredThreshold = 30_000L // 30 seconds
+        val iterator = recentSentReplies.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value > expiredThreshold) {
+                iterator.remove()
+            }
+        }
+    }
 }
+

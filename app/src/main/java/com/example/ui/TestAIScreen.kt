@@ -23,17 +23,21 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -67,8 +71,14 @@ fun TestAIScreen(
     val settings by app.botSettingsRepository.settings.collectAsState()
 
     var testInput by remember { mutableStateOf("Hi! What services do you offer and what are your working hours?") }
-    var isLoading by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<GeminiResult?>(null) }
+    var isPingLoading by remember { mutableStateOf(false) }
+    var isReplyLoading by remember { mutableStateOf(false) }
+    var testType by remember { mutableStateOf("SIMULATION") } // "PING" or "SIMULATION"
+    var testResult by remember { mutableStateOf<GeminiResult?>(null) }
+    var testStage by remember { mutableStateOf("") }
+
+    val hasApiKey = app.secureApiKeyStorage.hasApiKey()
+    val maskedApiKey = app.secureApiKeyStorage.getMaskedApiKey()
 
     val quickPrompts = listOf(
         "What services do you offer?",
@@ -87,7 +97,7 @@ fun TestAIScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Header Banner
+        // 1. Header Banner
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)),
@@ -115,20 +125,20 @@ fun TestAIScreen(
                 Spacer(modifier = Modifier.width(14.dp))
                 Column {
                     Text(
-                        text = "LIVE AI SIMULATOR",
+                        text = "LIVE AI DIAGNOSTICS",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary,
                         letterSpacing = 1.sp
                     )
                     Text(
-                        text = "Test Gemini API & Prompt",
+                        text = "Test Gemini API & Pipeline",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Verify real model responses, prompt rules, and latency instantly.",
+                        text = "Real Gemini requests independent from WhatsApp using the shared GeminiService.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -136,7 +146,66 @@ fun TestAIScreen(
             }
         }
 
-        // Input Card
+        // 2. API Key Status Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("api_key_status_card"),
+            colors = CardDefaults.cardColors(
+                containerColor = if (hasApiKey) {
+                    MaterialTheme.colorScheme.surface
+                } else {
+                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                }
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        tint = if (hasApiKey) MaterialTheme.colorScheme.primary else StatusError,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = if (hasApiKey) "Gemini API Key Configured" else "Gemini API Key Missing",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = if (hasApiKey) MaterialTheme.colorScheme.onSurface else StatusError
+                        )
+                        Text(
+                            text = if (hasApiKey) "$maskedApiKey  •  Model: ${settings.geminiModel}" else "Go to Settings tab to enter your Gemini API key",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    color = if (hasApiKey) StatusSuccess.copy(alpha = 0.15f) else StatusError.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = if (hasApiKey) "READY" else "ACTION NEEDED",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (hasApiKey) StatusSuccess else StatusError
+                    )
+                }
+            }
+        }
+
+        // 3. Quick Connection Ping Test
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -144,7 +213,64 @@ fun TestAIScreen(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "SIMULATE INCOMING MESSAGE",
+                    text = "STEP 1: API AUTHENTICATION & PING",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Sends a minimal 1-token request directly to Gemini to verify API authentication and server response latency.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        isPingLoading = true
+                        testType = "PING"
+                        testStage = "Sending ping request to Gemini API..."
+                        testResult = null
+                        coroutineScope.launch {
+                            val res = app.geminiService.testConnection(model = settings.geminiModel)
+                            testResult = res
+                            testStage = if (res is GeminiResult.Success) "Ping successful" else "Ping failed"
+                            isPingLoading = false
+                        }
+                    },
+                    enabled = !isPingLoading && !isReplyLoading && hasApiKey,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("ping_gemini_button")
+                ) {
+                    if (isPingLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Verifying API Key & Connectivity...")
+                    } else {
+                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Test Gemini Connection (Ping)")
+                    }
+                }
+            }
+        }
+
+        // 4. WhatsApp Reply Simulation Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "STEP 2: SIMULATE WHATSAPP AI REPLY",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
@@ -193,24 +319,27 @@ fun TestAIScreen(
                 Button(
                     onClick = {
                         if (testInput.isNotBlank()) {
-                            isLoading = true
-                            result = null
+                            isReplyLoading = true
+                            testType = "SIMULATION"
+                            testStage = "Request started: formatting prompt, personality & rules..."
+                            testResult = null
                             coroutineScope.launch {
                                 val res = app.geminiService.generateReply(
                                     incomingMessage = testInput,
                                     settings = settings
                                 )
-                                result = res
-                                isLoading = false
+                                testResult = res
+                                testStage = if (res is GeminiResult.Success) "Response extracted & verified" else "Request failed"
+                                isReplyLoading = false
                             }
                         }
                     },
-                    enabled = !isLoading && testInput.isNotBlank(),
+                    enabled = !isReplyLoading && !isPingLoading && testInput.isNotBlank() && hasApiKey,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("execute_test_button")
                 ) {
-                    if (isLoading) {
+                    if (isReplyLoading) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(18.dp),
                             strokeWidth = 2.dp,
@@ -221,14 +350,14 @@ fun TestAIScreen(
                     } else {
                         Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Generate AI Reply")
+                        Text("Simulate AI WhatsApp Reply")
                     }
                 }
             }
         }
 
-        // Result Card
-        result?.let { res ->
+        // 5. Diagnostics & Results Card
+        testResult?.let { res ->
             when (res) {
                 is GeminiResult.Success -> {
                     Card(
@@ -253,7 +382,7 @@ fun TestAIScreen(
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "AI RESPONSE GENERATED",
+                                        text = if (testType == "PING") "CONNECTION TEST PASSED" else "AI RESPONSE GENERATED",
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 12.sp,
                                         color = StatusSuccess,
@@ -286,9 +415,33 @@ fun TestAIScreen(
                                 }
                             }
 
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Diagnostic Pipeline Stepper
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = "DIAGNOSTIC TRACE:",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text("✓ API Key: Loaded & authenticated ($maskedApiKey)", fontSize = 11.sp)
+                                    Text("✓ Model: ${settings.geminiModel}", fontSize = 11.sp)
+                                    Text("✓ HTTP Status: 200 OK (${res.latencyMs}ms)", fontSize = 11.sp)
+                                    Text("✓ Response Parsing: Text extracted successfully", fontSize = 11.sp)
+                                }
+                            }
+
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            // Simulated WhatsApp Message Bubble
+                            // Simulated Output Bubble
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant,
                                 shape = RoundedCornerShape(14.dp),
@@ -304,7 +457,7 @@ fun TestAIScreen(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "Quantum Bot (WhatsApp Output):",
+                                            text = if (testType == "PING") "Gemini Response:" else "Quantum Bot (WhatsApp Output):",
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.SemiBold,
                                             color = MaterialTheme.colorScheme.primary
@@ -340,26 +493,54 @@ fun TestAIScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "GENERATION FAILED",
+                                    text = "REQUEST FAILED",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
                                     color = StatusError,
                                     letterSpacing = 1.sp
                                 )
                             }
+
                             Spacer(modifier = Modifier.height(8.dp))
+
                             Text(
                                 text = res.message,
                                 fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
+
                             if (res.latencyMs > 0) {
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "Failed after ${res.latencyMs} ms",
+                                    text = "Request latency: ${res.latencyMs} ms",
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Troubleshooting recommendations
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = "TROUBLESHOOTING CHECKLIST:",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.error,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text("• If HTTP 400: Confirm your API key has no trailing whitespace.", fontSize = 11.sp)
+                                    Text("• If HTTP 401/403: Re-copy your key from Google AI Studio.", fontSize = 11.sp)
+                                    Text("• If HTTP 404: In Settings, select 'gemini-2.5-flash'.", fontSize = 11.sp)
+                                    Text("• If HTTP 429: Rate limit hit. Free tier limits apply.", fontSize = 11.sp)
+                                }
                             }
                         }
                     }
@@ -370,3 +551,4 @@ fun TestAIScreen(
         Spacer(modifier = Modifier.height(24.dp))
     }
 }
+
