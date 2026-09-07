@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Quantum Bot</string>
+    <string name="accessibility_service_description">Automates intelligent auto-replies for WhatsApp chats based on custom rules and Gemini AI.</string>
+</resources>

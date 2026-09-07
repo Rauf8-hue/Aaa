@@ -1,0 +1,6 @@
+{
+  "name": "Quantum Bot",
+  "description": "Automatic WhatsApp AI reply assistant with custom rules, Gemini AI fallback, and accessibility automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
